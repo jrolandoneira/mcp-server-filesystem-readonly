@@ -1,15 +1,19 @@
 {
-  "name": "@modelcontextprotocol/server-filesystem",
-  "version": "0.6.3",
-  "description": "MCP server for filesystem access",
+  "name": "@jrolandoneira/mcp-server-filesystem-readonly",
+  "version": "0.1.0",
+  "description": "Fork of @modelcontextprotocol/server-filesystem with per-directory readonly mode support via :ro suffix on CLI arguments.",
   "license": "SEE LICENSE IN LICENSE",
   "mcpName": "io.github.modelcontextprotocol/server-filesystem",
   "author": "Model Context Protocol a Series of LF Projects, LLC.",
-  "homepage": "https://modelcontextprotocol.io",
-  "bugs": "https://github.com/modelcontextprotocol/servers/issues",
+  "contributors": [
+    "Rolando Neira <https://github.com/jrolandoneira> (fork maintainer)"
+  ],
+  "homepage": "https://github.com/jrolandoneira/mcp-server-filesystem-readonly",
+  "bugs": "https://github.com/jrolandoneira/mcp-server-filesystem-readonly/issues",
   "repository": {
     "type": "git",
-    "url": "https://github.com/modelcontextprotocol/servers.git"
+    "url": "https://github.com/jrolandoneira/mcp-server-filesystem-readonly.git",
+    "directory": "src/filesystem"
   },
   "type": "module",
   "bin": {
