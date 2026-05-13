@@ -1,0 +1,91 @@
+name: Upstream watcher
+
+# Watches modelcontextprotocol/servers for commits that touch
+# src/filesystem/ (the subproject this fork modifies). When new
+# upstream commits are detected, opens or updates a tracking issue
+# labelled "upstream-sync" so the maintainer can review/cherry-pick.
+
+on:
+  schedule:
+    # Mondays 09:00 UTC.
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Add upstream remote and fetch
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/modelcontextprotocol/servers.git
+          git fetch upstream main
+
+      - name: Ensure upstream-sync label exists (idempotent, S4)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Create the label if missing; ignore "already exists" so the
+          # job is idempotent on every run.
+          gh label create upstream-sync \
+            --color "0E8A16" \
+            --description "Tracks upstream commits affecting src/filesystem/" \
+            2>/dev/null || true
+
+      - name: Detect new upstream commits affecting src/filesystem/
+        id: detect
+        run: |
+          set -euo pipefail
+          COMMITS=$(git log --pretty=format:'%H' origin/main..upstream/main -- src/filesystem/ || true)
+          if [ -z "$COMMITS" ]; then
+            echo "has_new=false" >> "$GITHUB_OUTPUT"
+            echo "No new upstream commits affecting src/filesystem/."
+            exit 0
+          fi
+          COUNT=$(printf '%s\n' "$COMMITS" | wc -l | tr -d ' ')
+          echo "has_new=true" >> "$GITHUB_OUTPUT"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "The following commits on \`modelcontextprotocol/servers@main\` touch \`src/filesystem/\` and are not yet in this fork:"
+            echo
+            git log --pretty=format:'- [`%h`](https://github.com/modelcontextprotocol/servers/commit/%H) %s — _%an_, %ad' --date=short origin/main..upstream/main -- src/filesystem/
+            echo
+            echo
+            echo "---"
+            echo
+            echo "_Auto-managed by the \`upstream-watcher\` workflow. It refreshes the issue weekly (Mondays 09:00 UTC) and on manual dispatch. Close once the listed commits have been reviewed or cherry-picked._"
+          } > issue-body.md
+
+      - name: Open or update tracking issue
+        if: steps.detect.outputs.has_new == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COUNT: ${{ steps.detect.outputs.count }}
+        run: |
+          set -euo pipefail
+          TITLE="Upstream sync: ${COUNT} new commits affecting src/filesystem/"
+          EXISTING=$(gh issue list --label upstream-sync --state open --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh issue edit "$EXISTING" --title "$TITLE" --body-file issue-body.md
+            echo "Updated existing issue #${EXISTING}."
+          else
+            gh issue create --label upstream-sync --title "$TITLE" --body-file issue-body.md
+          fi
+
+      - name: Summary
+        run: |
+          if [ "${{ steps.detect.outputs.has_new }}" = "true" ]; then
+            echo "::notice title=Upstream sync needed::${{ steps.detect.outputs.count }} new commits affecting src/filesystem/."
+          else
+            echo "::notice title=Upstream sync up to date::No new commits affecting src/filesystem/."
+          fi
