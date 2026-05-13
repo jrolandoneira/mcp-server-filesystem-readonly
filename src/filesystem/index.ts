@@ -746,20 +746,34 @@ server.registerTool(
   {
     title: "List Allowed Directories",
     description:
-      "Returns the list of directories that this server is allowed to access. " +
+      "Returns the list of directories that this server is allowed to access, " +
+      "each annotated with its access mode ('rw' or 'ro'). " +
       "Subdirectories within these allowed directories are also accessible. " +
+      "Tools that perform writes (write_file, edit_file, create_directory, move_file) " +
+      "will reject paths that fall under a directory marked 'ro'. " +
       "Use this to understand which directories and their nested paths are available " +
       "before trying to access files.",
     inputSchema: {},
-    outputSchema: { content: z.string() },
+    outputSchema: {
+      content: z.string(),
+      directories: z.array(z.object({
+        path: z.string(),
+        mode: z.enum(['rw', 'ro'])
+      }))
+    },
     annotations: { readOnlyHint: true }
   },
   async () => {
-    // Phase 2 transitional form (only paths). Phase 5 adds modes + structuredContent.
-    const text = `Allowed directories:\n${allowedDirectories.map(d => d.path).join('\n')}`;
+    // S3: numeric counter in the header for legibility when there are many roots.
+    const header = `Allowed directories (${allowedDirectories.length}):`;
+    const body = allowedDirectories.map(d => `${d.path} (${d.mode})`).join('\n');
+    const text = body.length > 0 ? `${header}\n${body}` : header;
+    // S1: typed structured payload so MCP clients can consume modes without
+    // parsing the textual rendering.
+    const directories = allowedDirectories.map(d => ({ path: d.path, mode: d.mode }));
     return {
       content: [{ type: "text" as const, text }],
-      structuredContent: { content: text }
+      structuredContent: { content: text, directories }
     };
   }
 );
@@ -809,7 +823,10 @@ server.server.oninitialized = async () => {
     }
   } else {
     if (allowedDirectories.length > 0) {
-      console.error("Client does not support MCP Roots, using allowed directories set from server args:", allowedDirectories);
+      // S3: contador (N) en el header para legibilidad cuando hay muchas raíces.
+      const header = `Client does not support MCP Roots, using allowed directories from server args (${allowedDirectories.length}):`;
+      const body = allowedDirectories.map(d => `  ${d.path} (${d.mode})`).join('\n');
+      console.error(`${header}\n${body}`);
     }else{
       throw new Error(`Server cannot operate: No allowed directories available. Server was started without command-line directories and client either does not support MCP roots protocol or provided empty roots. Please either: 1) Start server with directory arguments, or 2) Use a client that supports MCP roots protocol and provides valid root directories.`);
     }
