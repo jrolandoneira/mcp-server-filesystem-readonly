@@ -18,6 +18,7 @@ import {
   // Function imports
   formatSize,
   validatePath,
+  validateWritePath,
   getFileStats,
   readFileContent,
   writeFileContent,
@@ -409,7 +410,7 @@ server.registerTool(
     annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: true }
   },
   async (args: z.infer<typeof WriteFileArgsSchema>) => {
-    const validPath = await validatePath(args.path);
+    const validPath = await validateWritePath(args.path);
     await writeFileContent(validPath, args.content);
     const text = `Successfully wrote to ${args.path}`;
     return {
@@ -439,7 +440,7 @@ server.registerTool(
     annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: true }
   },
   async (args: z.infer<typeof EditFileArgsSchema>) => {
-    const validPath = await validatePath(args.path);
+    const validPath = await validateWritePath(args.path);
     const result = await applyFileEdits(validPath, args.edits, args.dryRun);
     return {
       content: [{ type: "text" as const, text: result }],
@@ -464,7 +465,7 @@ server.registerTool(
     annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false }
   },
   async (args: z.infer<typeof CreateDirectoryArgsSchema>) => {
-    const validPath = await validatePath(args.path);
+    const validPath = await validateWritePath(args.path);
     await fs.mkdir(validPath, { recursive: true });
     const text = `Successfully created directory ${args.path}`;
     return {
@@ -668,8 +669,11 @@ server.registerTool(
     annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: true }
   },
   async (args: z.infer<typeof MoveFileArgsSchema>) => {
-    const validSourcePath = await validatePath(args.source);
-    const validDestPath = await validatePath(args.destination);
+    // Both source and destination are write operations: moving deletes the
+    // original (write on source) and creates at the target (write on dest).
+    // Either falling under an ro root blocks the operation.
+    const validSourcePath = await validateWritePath(args.source);
+    const validDestPath = await validateWritePath(args.destination);
     await fs.rename(validSourcePath, validDestPath);
     const text = `Successfully moved ${args.source} to ${args.destination}`;
     const contentBlock = { type: "text" as const, text };

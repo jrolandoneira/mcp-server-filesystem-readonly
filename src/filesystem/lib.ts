@@ -162,6 +162,53 @@ export async function validatePath(requestedPath: string): Promise<string> {
 }
 
 
+// Validates a path for write operations.
+//
+// First defers to validatePath (which enforces pertinence and resolves
+// symlinks), then determines which allowed root the resolved path belongs
+// to and enforces that root's mode. Pure: no logs, no side effects on
+// disk; returns the validated path or throws.
+//
+// A2: when several roots match (nested roots, e.g. `/data` ro and
+// `/data/sub` rw), the root with the longest normalized path wins
+// ("most-specific match wins"). This enables patterns like "everything
+// in ro except this subdir in rw" and its symmetric.
+//
+// Mode is determined on the resolved path returned by validatePath, not
+// on the requested path. A symlink in an rw root pointing into an ro
+// root resolves to the ro root and is blocked accordingly.
+export async function validateWritePath(requestedPath: string): Promise<string> {
+  const validatedPath = await validatePath(requestedPath);
+  const normalizedValidated = normalizePath(validatedPath);
+
+  // A1: isPathWithinAllowedDirectories keeps its string[] signature. We
+  // invoke it once per root with a single-element array to recover the
+  // owning root with its mode metadata.
+  const matching = allowedDirectories.filter(d =>
+    isPathWithinAllowedDirectories(normalizedValidated, [d.path])
+  );
+
+  if (matching.length === 0) {
+    // validatePath already guarantees pertinence; this guards against the
+    // narrow window where the allowed-roots set could be replaced between
+    // validatePath and this check (MCP Roots dynamic update).
+    throw new Error(`Access denied - path outside allowed directories: ${validatedPath}`);
+  }
+
+  const owningRoot = matching.reduce((best, current) =>
+    current.path.length > best.path.length ? current : best
+  );
+
+  if (owningRoot.mode === 'ro') {
+    throw new Error(
+      `Operation not permitted: path '${validatedPath}' is within a readonly root directory ('${owningRoot.path}')`
+    );
+  }
+
+  return validatedPath;
+}
+
+
 // File Operations
 export async function getFileStats(filePath: string): Promise<FileInfo> {
   const stats = await fs.stat(filePath);
