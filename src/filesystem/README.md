@@ -2,6 +2,38 @@
 
 Node.js server implementing Model Context Protocol (MCP) for filesystem operations.
 
+## Fork notice — readonly mode
+
+This is a fork of `@modelcontextprotocol/server-filesystem` that adds **per-directory readonly mode** via a `:ro` suffix on CLI arguments. Without the suffix, behavior is identical to the upstream server.
+
+### Quick example
+
+```bash
+mcp-server-filesystem /path/to/writable_dir /path/to/readonly_dir:ro
+```
+
+Tools that perform writes (`write_file`, `edit_file`, `create_directory`, `move_file`) reject any target path that falls under a directory marked `:ro` with a clear error message. Read-only tools (`read_text_file`, `list_directory`, `search_files`, ...) work as usual in both modes.
+
+### Suffix rules
+
+- Default mode (no suffix) is `rw`, preserving full backward compatibility with the upstream server.
+- The parser strips a trailing `:ro` or `:rw` from each CLI argument. The *final* suffix always wins.
+- **Escape for `:ro`/`:rw` literally in a directory name:** if a directory is named, for example, `/foo/bar:ro`, pass an explicit redundant suffix to disambiguate. `/foo/bar:ro:rw` strips the trailing `:rw` and leaves the path `/foo/bar:ro` in mode `rw`. Symmetrically, `/foo/bar:rw:ro` → path `/foo/bar:rw`, mode `ro`.
+
+### Nested roots
+
+If you declare overlapping roots (e.g. `/data:ro` together with `/data/sub:rw`), the **most-specific** root wins for any given path. So writes under `/data/sub` are allowed while writes elsewhere under `/data` remain blocked. This enables the pattern "everything under X is read-only, except this subdir Z is writable" and its symmetric.
+
+### Duplicate roots with conflicting modes
+
+If the same directory is declared with both `:rw` and `:ro` (e.g. `mcp-server-filesystem /data:rw /data:ro`), the server exits at startup with a clear error so the configuration mistake is obvious. Duplicates with the same mode are silently deduplicated.
+
+### Dynamic MCP Roots
+
+Directories supplied dynamically via the [MCP Roots protocol](https://modelcontextprotocol.io/docs/learn/client-concepts#roots) are always treated as `rw` in this version (the protocol does not transport per-root mode metadata). Use CLI arguments when you need fine-grained readonly markers.
+
+---
+
 ## Features
 
 - Read/write files
@@ -269,6 +301,27 @@ On Windows, use `cmd /c` to launch `npx`:
   }
 }
 ```
+
+### Readonly-aware setup (this fork)
+
+Once the fork is built locally, you can wire it as a `node` command and mark any subset of directories as `:ro`. Typical case: writable docs/briefs, read-only implementation source.
+
+```json
+{
+  "mcpServers": {
+    "filesystem-readonly-aware": {
+      "command": "node",
+      "args": [
+        "/absolute/path/to/mcp-server-filesystem-readonly/src/filesystem/dist/index.js",
+        "/absolute/path/to/docs",
+        "/absolute/path/to/code:ro"
+      ]
+    }
+  }
+}
+```
+
+Any write tool (`write_file`, `edit_file`, `create_directory`, `move_file`) targeting a path under `/absolute/path/to/code` will return a clear "readonly root directory" error; reads succeed normally.
 
 ## Usage with VS Code
 
