@@ -1,5 +1,7 @@
 # Model Context Protocol servers
 
+> **Fork notice:** This is a fork of [modelcontextprotocol/servers](https://github.com/modelcontextprotocol/servers) maintained by [@jrolandoneira](https://github.com/jrolandoneira). The only modified subproject is `src/filesystem/`, which adds support for per-directory readonly mode via the `:ro` suffix on CLI arguments. All other subprojects (`git`, `memory`, `time`, etc.) are kept in sync with upstream and not modified. See [`src/filesystem/README.md`](src/filesystem/README.md) for usage of the readonly feature.
+
 This repository is a collection of *reference implementations* for the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP), as well as references to community-built servers and additional resources.
 
 > [!IMPORTANT]
