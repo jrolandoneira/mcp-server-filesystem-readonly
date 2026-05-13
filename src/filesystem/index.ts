@@ -26,25 +26,38 @@ import {
   tailFile,
   headFile,
   setAllowedDirectories,
+  type AllowedDirectory,
+  type DirectoryMode,
 } from './lib.js';
+
+// Strips a trailing ":ro" or ":rw" suffix and returns the path plus mode.
+// A4: the final suffix always wins. Users escape a directory whose real name
+// ends in ":ro"/":rw" by appending a redundant explicit suffix
+// (e.g. "/foo/bar:ro:rw" → path "/foo/bar:ro" in rw mode).
+function parseModeSuffix(arg: string): { rawPath: string; mode: DirectoryMode } {
+  if (arg.endsWith(':ro')) return { rawPath: arg.slice(0, -3), mode: 'ro' };
+  if (arg.endsWith(':rw')) return { rawPath: arg.slice(0, -3), mode: 'rw' };
+  return { rawPath: arg, mode: 'rw' };
+}
 
 // Command line argument parsing
 const args = process.argv.slice(2);
 if (args.length === 0) {
-  console.error("Usage: mcp-server-filesystem [allowed-directory] [additional-directories...]");
+  console.error("Usage: mcp-server-filesystem [allowed-directory[:ro|:rw]] [additional-directories...]");
   console.error("Note: Allowed directories can be provided via:");
-  console.error("  1. Command-line arguments (shown above)");
-  console.error("  2. MCP roots protocol (if client supports it)");
+  console.error("  1. Command-line arguments (shown above). Suffix with :ro for read-only, :rw (default) for read-write.");
+  console.error("  2. MCP roots protocol (if client supports it). Dynamic roots are always treated as :rw.");
   console.error("At least one directory must be provided by EITHER method for the server to operate.");
 }
 
-// Store allowed directories in normalized and resolved form
+// Store allowed directories in normalized and resolved form, paired with their mode.
 // We store BOTH the original path AND the resolved path to handle symlinks correctly
-// This fixes the macOS /tmp -> /private/tmp symlink issue where users specify /tmp
-// but the resolved path is /private/tmp
-let allowedDirectories = (await Promise.all(
-  args.map(async (dir) => {
-    const expanded = expandHome(dir);
+// (e.g. macOS /tmp -> /private/tmp). Both variants inherit the same mode declared
+// for the original argument.
+const parsedAllowedDirectories: AllowedDirectory[] = (await Promise.all(
+  args.map(async (arg): Promise<AllowedDirectory[]> => {
+    const { rawPath, mode } = parseModeSuffix(arg);
+    const expanded = expandHome(rawPath);
     const absolute = path.resolve(expanded);
     const normalizedOriginal = normalizePath(absolute);
     try {
@@ -52,32 +65,76 @@ let allowedDirectories = (await Promise.all(
       // This ensures we know the real paths and can validate against them later
       const resolved = await fs.realpath(absolute);
       const normalizedResolved = normalizePath(resolved);
-      // Return both original and resolved paths if they differ
-      // This allows matching against either /tmp or /private/tmp on macOS
+      // Return both original and resolved paths if they differ.
+      // Both variants share the same mode declared for this argument.
       if (normalizedOriginal !== normalizedResolved) {
-        return [normalizedOriginal, normalizedResolved];
+        return [
+          { path: normalizedOriginal, mode },
+          { path: normalizedResolved, mode },
+        ];
       }
-      return [normalizedResolved];
+      return [{ path: normalizedResolved, mode }];
     } catch (error) {
-      // If we can't resolve (doesn't exist), use the normalized absolute path
-      // This allows configuring allowed dirs that will be created later
-      return [normalizedOriginal];
+      // If we can't resolve (doesn't exist), use the normalized absolute path.
+      // This allows configuring allowed dirs that will be created later.
+      return [{ path: normalizedOriginal, mode }];
     }
   })
 )).flat();
 
+// A3: detect duplicates declared with conflicting modes (rw and ro for the
+// same normalized path). Duplicates with the same mode are silently deduped.
+// Conflict detection runs before the accessibility filter so the user sees
+// CLI configuration errors before unrelated directory warnings.
+{
+  const firstSeenMode = new Map<string, DirectoryMode>();
+  const conflicts = new Map<string, Set<DirectoryMode>>();
+  for (const entry of parsedAllowedDirectories) {
+    const previous = firstSeenMode.get(entry.path);
+    if (previous === undefined) {
+      firstSeenMode.set(entry.path, entry.mode);
+    } else if (previous !== entry.mode) {
+      const set = conflicts.get(entry.path) ?? new Set<DirectoryMode>([previous]);
+      set.add(entry.mode);
+      conflicts.set(entry.path, set);
+    }
+  }
+  if (conflicts.size > 0) {
+    for (const [conflictPath, modes] of conflicts) {
+      const modesList = Array.from(modes).sort().join(', ');
+      console.error(
+        `Error: directory '${conflictPath}' specified with conflicting modes (${modesList}). Remove the duplicate or pick one mode.`
+      );
+    }
+    process.exit(1);
+  }
+}
+
+// Dedupe entries with identical {path, mode} while preserving first-seen order.
+let allowedDirectories: AllowedDirectory[] = (() => {
+  const seen = new Set<string>();
+  const deduped: AllowedDirectory[] = [];
+  for (const entry of parsedAllowedDirectories) {
+    if (!seen.has(entry.path)) {
+      seen.add(entry.path);
+      deduped.push(entry);
+    }
+  }
+  return deduped;
+})();
+
 // Filter to only accessible directories, warn about inaccessible ones
-const accessibleDirectories: string[] = [];
-for (const dir of allowedDirectories) {
+const accessibleDirectories: AllowedDirectory[] = [];
+for (const entry of allowedDirectories) {
   try {
-    const stats = await fs.stat(dir);
+    const stats = await fs.stat(entry.path);
     if (stats.isDirectory()) {
-      accessibleDirectories.push(dir);
+      accessibleDirectories.push(entry);
     } else {
-      console.error(`Warning: ${dir} is not a directory, skipping`);
+      console.error(`Warning: ${entry.path} is not a directory, skipping`);
     }
   } catch (error) {
-    console.error(`Warning: Cannot access directory ${dir}, skipping`);
+    console.error(`Warning: Cannot access directory ${entry.path}, skipping`);
   }
 }
 
@@ -643,7 +700,7 @@ server.registerTool(
   },
   async (args: z.infer<typeof SearchFilesArgsSchema>) => {
     const validPath = await validatePath(args.path);
-    const results = await searchFilesWithValidation(validPath, args.pattern, allowedDirectories, { excludePatterns: args.excludePatterns });
+    const results = await searchFilesWithValidation(validPath, args.pattern, allowedDirectories.map(d => d.path), { excludePatterns: args.excludePatterns });
     const text = results.length > 0 ? results.join("\n") : "No matches found";
     return {
       content: [{ type: "text" as const, text }],
@@ -694,7 +751,8 @@ server.registerTool(
     annotations: { readOnlyHint: true }
   },
   async () => {
-    const text = `Allowed directories:\n${allowedDirectories.join('\n')}`;
+    // Phase 2 transitional form (only paths). Phase 5 adds modes + structuredContent.
+    const text = `Allowed directories:\n${allowedDirectories.map(d => d.path).join('\n')}`;
     return {
       content: [{ type: "text" as const, text }],
       structuredContent: { content: text }
@@ -702,11 +760,14 @@ server.registerTool(
   }
 );
 
-// Updates allowed directories based on MCP client roots
+// Updates allowed directories based on MCP client roots.
+// The MCP Roots protocol does not transport per-root mode metadata, so all
+// dynamic roots are treated as rw. This preserves upstream behavior and is a
+// possible future enhancement once the protocol carries that information.
 async function updateAllowedDirectoriesFromRoots(requestedRoots: Root[]) {
   const validatedRootDirs = await getValidRootDirectories(requestedRoots);
   if (validatedRootDirs.length > 0) {
-    allowedDirectories = [...validatedRootDirs];
+    allowedDirectories = validatedRootDirs.map(p => ({ path: p, mode: 'rw' as const }));
     setAllowedDirectories(allowedDirectories); // Update the global state in lib.ts
     console.error(`Updated allowed directories from MCP roots: ${validatedRootDirs.length} valid directories`);
   } else {

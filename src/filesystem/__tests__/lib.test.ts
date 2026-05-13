@@ -29,9 +29,9 @@ const mockFs = fs as any;
 describe('Lib Functions', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    // Set up allowed directories for tests
+    // Set up allowed directories for tests (all rw — matches upstream behavior)
     const allowedDirs = process.platform === 'win32' ? ['C:\\Users\\test', 'C:\\temp', 'C:\\allowed'] : ['/home/user', '/tmp', '/allowed'];
-    setAllowedDirectories(allowedDirs);
+    setAllowedDirectories(allowedDirs.map(p => ({ path: p, mode: 'rw' as const })));
   });
 
   afterEach(() => {

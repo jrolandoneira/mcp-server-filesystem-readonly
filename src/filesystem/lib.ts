@@ -7,17 +7,33 @@ import { minimatch } from 'minimatch';
 import { normalizePath, expandHome } from './path-utils.js';
 import { isPathWithinAllowedDirectories } from './path-validation.js';
 
+// Per-directory mode: 'rw' allows read+write, 'ro' allows read-only access.
+export type DirectoryMode = 'rw' | 'ro';
+
+// An allowed directory paired with its access mode.
+export interface AllowedDirectory {
+  path: string;
+  mode: DirectoryMode;
+}
+
 // Global allowed directories - set by the main module
-let allowedDirectories: string[] = [];
+let allowedDirectories: AllowedDirectory[] = [];
 
 // Function to set allowed directories from the main module
-export function setAllowedDirectories(directories: string[]): void {
-  allowedDirectories = [...directories];
+export function setAllowedDirectories(directories: AllowedDirectory[]): void {
+  allowedDirectories = directories.map(d => ({ ...d }));
 }
 
 // Function to get current allowed directories
-export function getAllowedDirectories(): string[] {
-  return [...allowedDirectories];
+export function getAllowedDirectories(): AllowedDirectory[] {
+  return allowedDirectories.map(d => ({ ...d }));
+}
+
+// Returns just the path strings of the allowed directories, in declaration order.
+// Used at callsites that delegate to the mode-agnostic path-validation helpers
+// (A1: isPathWithinAllowedDirectories keeps its string[] signature).
+function allowedPaths(): string[] {
+  return allowedDirectories.map(d => d.path);
 }
 
 // Type definitions
@@ -79,20 +95,25 @@ function resolveRelativePathAgainstAllowedDirectories(relativePath: string): str
     return path.resolve(process.cwd(), relativePath);
   }
 
+  const paths = allowedPaths();
+
   // Try to resolve relative path against each allowed directory
-  for (const allowedDir of allowedDirectories) {
+  for (const allowedDir of paths) {
     const candidate = path.resolve(allowedDir, relativePath);
     const normalizedCandidate = normalizePath(candidate);
-    
+
     // Check if the resulting path lies within any allowed directory
-    if (isPathWithinAllowedDirectories(normalizedCandidate, allowedDirectories)) {
+    if (isPathWithinAllowedDirectories(normalizedCandidate, paths)) {
       return candidate;
     }
   }
-  
-  // If no valid resolution found, use the first allowed directory as base
-  // This provides a consistent fallback behavior
-  return path.resolve(allowedDirectories[0], relativePath);
+
+  // Fallback: prefer the first rw root as base for relative resolution
+  // (writing into an ro fallback would error out anyway). Falls back to the
+  // first declared root if no rw root exists.
+  const firstRw = allowedDirectories.find(d => d.mode === 'rw');
+  const fallbackBase = firstRw?.path ?? paths[0];
+  return path.resolve(fallbackBase, relativePath);
 }
 
 // Security & Validation Functions
@@ -103,11 +124,12 @@ export async function validatePath(requestedPath: string): Promise<string> {
     : resolveRelativePathAgainstAllowedDirectories(expandedPath);
 
   const normalizedRequested = normalizePath(absolute);
+  const paths = allowedPaths();
 
   // Security: Check if path is within allowed directories before any file operations
-  const isAllowed = isPathWithinAllowedDirectories(normalizedRequested, allowedDirectories);
+  const isAllowed = isPathWithinAllowedDirectories(normalizedRequested, paths);
   if (!isAllowed) {
-    throw new Error(`Access denied - path outside allowed directories: ${absolute} not in ${allowedDirectories.join(', ')}`);
+    throw new Error(`Access denied - path outside allowed directories: ${absolute} not in ${paths.join(', ')}`);
   }
 
   // Security: Handle symlinks by checking their real path to prevent symlink attacks
@@ -115,8 +137,8 @@ export async function validatePath(requestedPath: string): Promise<string> {
   try {
     const realPath = await fs.realpath(absolute);
     const normalizedReal = normalizePath(realPath);
-    if (!isPathWithinAllowedDirectories(normalizedReal, allowedDirectories)) {
-      throw new Error(`Access denied - symlink target outside allowed directories: ${realPath} not in ${allowedDirectories.join(', ')}`);
+    if (!isPathWithinAllowedDirectories(normalizedReal, paths)) {
+      throw new Error(`Access denied - symlink target outside allowed directories: ${realPath} not in ${paths.join(', ')}`);
     }
     return realPath;
   } catch (error) {
@@ -127,8 +149,8 @@ export async function validatePath(requestedPath: string): Promise<string> {
       try {
         const realParentPath = await fs.realpath(parentDir);
         const normalizedParent = normalizePath(realParentPath);
-        if (!isPathWithinAllowedDirectories(normalizedParent, allowedDirectories)) {
-          throw new Error(`Access denied - parent directory outside allowed directories: ${realParentPath} not in ${allowedDirectories.join(', ')}`);
+        if (!isPathWithinAllowedDirectories(normalizedParent, paths)) {
+          throw new Error(`Access denied - parent directory outside allowed directories: ${realParentPath} not in ${paths.join(', ')}`);
         }
         return absolute;
       } catch {
