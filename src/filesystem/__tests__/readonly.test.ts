@@ -78,55 +78,104 @@ describe('Readonly mode for allowed directories', () => {
   });
 
   // ------------------------------------------------------------------
-  // CLI parser — basic cases (no suffix, :ro, :rw)
+  // CLI parser — basic cases (no suffix, :ro, :rw). Verified by connecting
+  // a real MCP client and inspecting list_allowed_directories. The per-
+  // directory startup log fires only inside oninitialized (after the
+  // client completes MCP initialization), so a bare spawn cannot observe
+  // the parsed modes — going through the client tests the parser, the
+  // global state propagation, and the tool wiring in one shot.
   // ------------------------------------------------------------------
   describe('CLI parser', () => {
+    async function callListAllowedDirectories(spawnArgs: string[]) {
+      const transport = new StdioClientTransport({
+        command: 'node',
+        args: [SERVER_PATH, ...spawnArgs],
+      });
+      const client = new Client({ name: 'test-client', version: '1.0.0' }, { capabilities: {} });
+      await client.connect(transport);
+      try {
+        const result = await client.callTool({
+          name: 'list_allowed_directories',
+          arguments: {},
+        });
+        return {
+          text: firstText(result),
+          structured: result.structuredContent as {
+            content: string;
+            directories: Array<{ path: string; mode: 'rw' | 'ro' }>;
+          },
+        };
+      } finally {
+        await client.close();
+      }
+    }
+
     it('directory without suffix → mode rw (default)', async () => {
-      const result = await spawnServer([rwDir]);
-      expect(result.stderr).toContain('Secure MCP Filesystem Server running on stdio');
-      expect(result.stderr).toMatch(/\(rw\)/);
-      expect(result.stderr).not.toMatch(/\(ro\)/);
+      const { structured } = await callListAllowedDirectories([rwDir]);
+      const modes = structured.directories.map((d) => d.mode);
+      expect(modes).toEqual(['rw']);
     });
 
     it('directory with :ro suffix → mode ro', async () => {
-      const result = await spawnServer([`${rwDir}:ro`]);
-      expect(result.stderr).toContain('Secure MCP Filesystem Server running on stdio');
-      expect(result.stderr).toMatch(/\(ro\)/);
+      const { structured } = await callListAllowedDirectories([`${rwDir}:ro`]);
+      const modes = structured.directories.map((d) => d.mode);
+      expect(modes).toEqual(['ro']);
     });
 
     it('directory with explicit :rw suffix → mode rw', async () => {
-      const result = await spawnServer([`${rwDir}:rw`]);
-      expect(result.stderr).toContain('Secure MCP Filesystem Server running on stdio');
-      expect(result.stderr).toMatch(/\(rw\)/);
+      const { structured } = await callListAllowedDirectories([`${rwDir}:rw`]);
+      const modes = structured.directories.map((d) => d.mode);
+      expect(modes).toEqual(['rw']);
     });
 
-    it('startup log includes the (N) counter (S3)', async () => {
-      const result = await spawnServer([rwDir, `${roDir}:ro`]);
-      expect(result.stderr).toMatch(/allowed directories from server args \(2\)/);
+    it('list_allowed_directories header includes the (N) counter (S3)', async () => {
+      const { text } = await callListAllowedDirectories([rwDir, `${roDir}:ro`]);
+      expect(text).toMatch(/Allowed directories \(2\):/);
     });
   });
 
   // ------------------------------------------------------------------
   // Suffix escape (A4) — ":ro" or ":rw" literal in directory name.
   // Windows disallows ':' in path segments, so this is Unix-only.
+  // We verify through the MCP client (same reason as above).
   // ------------------------------------------------------------------
   (isWindows ? describe.skip : describe)('Suffix escape (A4)', () => {
+    async function callListAllowedDirectories(spawnArgs: string[]) {
+      const transport = new StdioClientTransport({
+        command: 'node',
+        args: [SERVER_PATH, ...spawnArgs],
+      });
+      const client = new Client({ name: 'test-client', version: '1.0.0' }, { capabilities: {} });
+      await client.connect(transport);
+      try {
+        const result = await client.callTool({
+          name: 'list_allowed_directories',
+          arguments: {},
+        });
+        return result.structuredContent as {
+          directories: Array<{ path: string; mode: 'rw' | 'ro' }>;
+        };
+      } finally {
+        await client.close();
+      }
+    }
+
     it('"dir:ro:rw" → strips :rw, path real is "dir:ro" in mode rw', async () => {
       const weirdDir = path.join(testDir, 'weird:ro');
       await fs.mkdir(weirdDir);
-      const result = await spawnServer([`${weirdDir}:rw`]);
-      expect(result.stderr).toContain('Secure MCP Filesystem Server running on stdio');
-      expect(result.stderr).toMatch(/weird:ro \(rw\)/);
-      expect(result.stderr).not.toMatch(/Cannot access directory/);
+      const sc = await callListAllowedDirectories([`${weirdDir}:rw`]);
+      const entry = sc.directories.find((d) => d.path.endsWith('weird:ro'));
+      expect(entry).toBeDefined();
+      expect(entry?.mode).toBe('rw');
     });
 
     it('"dir:rw:ro" → strips :ro, path real is "dir:rw" in mode ro', async () => {
       const weirdDir = path.join(testDir, 'weird:rw');
       await fs.mkdir(weirdDir);
-      const result = await spawnServer([`${weirdDir}:ro`]);
-      expect(result.stderr).toContain('Secure MCP Filesystem Server running on stdio');
-      expect(result.stderr).toMatch(/weird:rw \(ro\)/);
-      expect(result.stderr).not.toMatch(/Cannot access directory/);
+      const sc = await callListAllowedDirectories([`${weirdDir}:ro`]);
+      const entry = sc.directories.find((d) => d.path.endsWith('weird:rw'));
+      expect(entry).toBeDefined();
+      expect(entry?.mode).toBe('ro');
     });
   });
 
